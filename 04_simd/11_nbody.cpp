@@ -6,7 +6,6 @@
 int main() {
   const int N = 16;
   float x[N], y[N], m[N], fx[N], fy[N];
-  float count[N];
   for(int i=0; i<N; i++) {
     x[i] = drand48();
     y[i] = drand48();
@@ -57,6 +56,7 @@ int main() {
       }
     }
     */
+    
     printf("%d %g %g\n",i,fx[i],fy[i]);
   }
 }
