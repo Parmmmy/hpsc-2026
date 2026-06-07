@@ -72,6 +72,9 @@ int main(int argc, const char **argv) {
   for (int i=0; i<n; i++)
     for (int j=0; j<m; j++)
       C[m*i+j] = C2[m*i+j] = 0;
+
+
+  //cublas reference
   cublasHandle_t cublas_handle;
   cublasCreate(&cublas_handle);
   auto tic = chrono::steady_clock::now();
@@ -96,6 +99,10 @@ int main(int argc, const char **argv) {
   int64_t num_flops = (2 * int64_t(m) * int64_t(n) * int64_t(k)) + (2 * int64_t(m) * int64_t(n));
   double tcublas = chrono::duration<double>(toc - tic).count() / Nt;
   double cublas_flops = double(num_flops) / tcublas / 1.0e9;
+
+
+
+
   int tile = 64;
   dim3 block = dim3(tile);
   dim3 grid = dim3((m+tile-1)/tile, (n+tile-1)/tile);
