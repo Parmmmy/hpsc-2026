@@ -8,50 +8,122 @@
 using namespace std;
 using namespace nvcuda;
 
-__global__ void kernel(int dim_m, int dim_n, int dim_k,
-		       float *d_a, float *d_b, float *d_c) {
-  int offset_a_m = 64 * blockIdx.x;
-  int offset_b_n = 64 * blockIdx.y;
-  int i = threadIdx.x;
-  int warp_id = threadIdx.x / 32;
+constexpr int BM = 128;
+constexpr int BN = 128; 
+constexpr int BK = 16;
+constexpr int WARP_M = 32; 
+constexpr int WARP_N = 64; 
+constexpr int PAD = 8; 
 
-  __shared__ half block_a[16][64];
-  __shared__ half block_b[16][64];
+#define SMEM_A(stage, row, col) smem_a[(stage)][(row)][(col)]
+#define SMEM_B(stage, row, col) smem_b[(stage)][(row)][(col)]
 
-  wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4];
-  for (int r = 0; r < 2; r++)
-    for (int c = 0; c < 4; c++)
-      wmma::fill_fragment(acc[r][c], 0.0f);
 
-  for (int k = 0; k < dim_k; k += 16) {
-    __syncthreads();
-    for (int j = 0; j < 16; ++j) {
-      block_a[j][i] = __float2half(d_a[(k + j) * dim_m + offset_a_m + i]);
-      block_b[j][i] = __float2half(d_b[(offset_b_n + i) * dim_k + k + j]);
-    }
-    __syncthreads();
-    for (int r = 0; r < 2; r++) {
-      int row_tile = warp_id * 2 + r;
-      wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> a_frag;
-      wmma::load_matrix_sync(a_frag, &block_a[0][row_tile * 16], 64);
-      for (int c = 0; c < 4; c++) {
-        wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
-        wmma::load_matrix_sync(b_frag, &block_b[0][c * 16], 64);
-        wmma::mma_sync(acc[r][c], a_frag, b_frag, acc[r][c]);
-      }
-    }
-  }
-  #pragma unroll
-  for (int r = 0; r < 2; r++) {
+__global__ __launch_bounds__(256, 2)
+void kernel(int dim_m, int dim_n, int dim_k, const float* __restrict__ d_a, const float* __restrict__ d_b, float* __restrict__ d_c) 
+{
+
+    const int bm = blockIdx.x * BM;  
+    const int bn = blockIdx.y * BN;   
+
+    const int tid = threadIdx.x;
+    const int warp_id = tid / 32;
+    // const int lane = tid & 31;
+
+    constexpr int WARPS_N = BN / WARP_N;
+    const int wr = warp_id / WARPS_N;
+    const int wc = warp_id % WARPS_N;
+
+    __shared__ half smem_a[2][BK][BM + PAD]; 
+    __shared__ half smem_b[2][BK][BN + PAD]; 
+
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4];
     #pragma unroll
-    for (int c = 0; c < 4; c++) {
-      int c_m = offset_a_m + (warp_id * 2 + r) * 16;
-      int c_n = offset_b_n + c * 16;
-      if (c_n < dim_n && c_m < dim_m)
-        wmma::store_matrix_sync(&d_c[c_n * dim_m + c_m], acc[r][c], dim_m, wmma::mem_col_major);
+    for (int r = 0; r < 2; r++)
+        #pragma unroll
+        for (int c = 0; c < 4; c++)
+            wmma::fill_fragment(acc[r][c], 0.0f);
+
+     int k0 = 0;
+
+    {
+        
+        #pragma unroll
+        for (int idx = tid; idx < BK * BM; idx += 256) {
+            int k_local = idx / BM;
+            int m_local = idx % BM;
+            int g_k = k0 + k_local;
+            int g_m = bm + m_local;
+            smem_a[0][k_local][m_local] = __float2half(d_a[g_k * dim_m + g_m]);
+        }
+        #pragma unroll
+        for (int idx = tid; idx < BK * BN; idx += 256) {
+            int k_local = idx / BN;
+            int n_local = idx % BN;
+            int g_k = k0 + k_local;
+            int g_n = bn + n_local;
+            smem_b[0][k_local][n_local] = __float2half(d_b[g_k * dim_n + g_n]);
+        }
     }
-  }
+    __syncthreads();
+
+    for (int k = 0; k < dim_k; k += BK) {
+        int cur  = (k / BK) & 1;
+        int next = cur ^ 1;
+
+        if (k + BK < dim_k) {
+            int kn = k + BK;
+            #pragma unroll
+            for (int idx = tid; idx < BK * BM; idx += 256) {
+                int k_local = idx / BM;
+                int m_local = idx % BM;
+                int g_k = kn + k_local;
+                int g_m = bm + m_local;
+                smem_a[next][k_local][m_local] =__float2half(d_a[g_k * dim_m + g_m]);
+            }
+            #pragma unroll
+            for (int idx = tid; idx < BK * BN; idx += 256) {
+                int k_local = idx / BN;
+                int n_local = idx % BN;
+                int g_k = kn + k_local;
+                int g_n = bn + n_local;
+                smem_b[next][k_local][n_local] =__float2half(d_b[g_k * dim_n + g_n]);
+            }
+        }
+
+        #pragma unroll
+        for (int r = 0; r < 2; r++) {
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> a_frag;
+            wmma::load_matrix_sync(a_frag,
+                &SMEM_A(cur, 0, wr * WARP_M + r * 16),
+                BM + PAD);
+            #pragma unroll
+            for (int c = 0; c < 4; c++) {
+                wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
+                wmma::load_matrix_sync(b_frag,
+                    &SMEM_B(cur, 0, wc * WARP_N + c * 16),
+                    BN + PAD);
+                wmma::mma_sync(acc[r][c], a_frag, b_frag, acc[r][c]);
+            }
+        }
+        __syncthreads();
+    }
+
+    #pragma unroll
+    for (int r = 0; r < 2; r++) {
+        #pragma unroll
+        for (int c = 0; c < 4; c++) {
+            int c_m = bm + wr * WARP_M + r * 16;
+            int c_n = bn + wc * WARP_N + c * 16;
+            if (c_m < dim_m && c_n < dim_n)
+                wmma::store_matrix_sync(&d_c[c_n * dim_m + c_m],
+                                        acc[r][c], dim_m,
+                                        wmma::mem_col_major);
+        }
+    }
 }
+
+
 
 int main(int argc, const char **argv) {
   int m = 10240;
@@ -77,28 +149,6 @@ int main(int argc, const char **argv) {
 
 
 
-  int tile = 64;
-  dim3 block = dim3(tile);
-  dim3 grid = dim3((m+tile-1)/tile, (n+tile-1)/tile);
-  for (int i = 0; i < Nt+2; i++) {
-    if (i == 2) tic = chrono::steady_clock::now();
-    kernel<<< grid, block >>>(m,
-			      n,
-			      k,
-			      A,
-			      B,
-			      C2);
-    cudaDeviceSynchronize();
-  }
-  toc = chrono::steady_clock::now();
-  double tcutlass = chrono::duration<double>(toc - tic).count() / Nt;
-  double cutlass_flops = double(num_flops) / tcutlass / 1.0e9;
-  
-
-
-
-
-  //cublas reference
   cublasHandle_t cublas_handle;
   cublasCreate(&cublas_handle);
   auto tic = chrono::steady_clock::now();
@@ -122,9 +172,28 @@ int main(int argc, const char **argv) {
   auto toc = chrono::steady_clock::now();
   int64_t num_flops = (2 * int64_t(m) * int64_t(n) * int64_t(k)) + (2 * int64_t(m) * int64_t(n));
   double tcublas = chrono::duration<double>(toc - tic).count() / Nt;
-  double cublas_flops = double(num_flops) / tcublas / 1.0e9;	
-  printf("CUBLAS: %.2f Gflops, CUTLASS: %.2f Gflops\n", cublas_flops, cutlass_flops);
+  double cublas_flops = double(num_flops) / tcublas / 1.0e9;
 
+
+
+
+ dim3 block(256);
+   dim3 grid((m + BM - 1) / BM, (n + BN - 1) / BN);
+
+  for (int i = 0; i < Nt+2; i++) {
+    if (i == 2) tic = chrono::steady_clock::now();
+    kernel<<< grid, block >>>(m,
+			      n,
+			      k,
+			      A,
+			      B,
+			      C2);
+    cudaDeviceSynchronize();
+  }
+  toc = chrono::steady_clock::now();
+  double tcutlass = chrono::duration<double>(toc - tic).count() / Nt;
+  double cutlass_flops = double(num_flops) / tcutlass / 1.0e9;
+  printf("CUBLAS: %.2f Gflops, CUTLASS: %.2f Gflops\n", cublas_flops, cutlass_flops);
 
 
 
