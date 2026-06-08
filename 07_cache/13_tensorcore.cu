@@ -91,8 +91,7 @@ int main(int argc, const char **argv) {
   toc = chrono::steady_clock::now();
   double tcutlass = chrono::duration<double>(toc - tic).count() / Nt;
   double cutlass_flops = double(num_flops) / tcutlass / 1.0e9;
-  printf("CUBLAS: %.2f Gflops, CUTLASS: %.2f Gflops\n", cublas_flops, cutlass_flops);
-
+  
 
 
 
@@ -121,7 +120,8 @@ int main(int argc, const char **argv) {
   auto toc = chrono::steady_clock::now();
   int64_t num_flops = (2 * int64_t(m) * int64_t(n) * int64_t(k)) + (2 * int64_t(m) * int64_t(n));
   double tcublas = chrono::duration<double>(toc - tic).count() / Nt;
-  double cublas_flops = double(num_flops) / tcublas / 1.0e9;
+  double cublas_flops = double(num_flops) / tcublas / 1.0e9;	
+  printf("CUBLAS: %.2f Gflops, CUTLASS: %.2f Gflops\n", cublas_flops, cutlass_flops);
 
 
 
