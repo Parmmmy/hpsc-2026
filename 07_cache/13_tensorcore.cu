@@ -41,7 +41,9 @@ __global__ void kernel(int dim_m, int dim_n, int dim_k,
       }
     }
   }
+  #pragma unroll
   for (int r = 0; r < 2; r++) {
+    #pragma unroll
     for (int c = 0; c < 4; c++) {
       int c_m = offset_a_m + (warp_id * 2 + r) * 16;
       int c_n = offset_b_n + c * 16;
