@@ -9,22 +9,22 @@ using namespace std;
 using namespace nvcuda;
 
 constexpr int BM = 128;
-constexpr int BN = 128; 
+constexpr int BN = 128;
 constexpr int BK = 16;
-constexpr int WARP_M = 32; 
-constexpr int WARP_N = 64; 
-constexpr int PAD = 8; 
+constexpr int WARP_M = 32;
+constexpr int WARP_N = 64;
+constexpr int PAD = 8;
 
 #define SMEM_A(stage, row, col) smem_a[(stage)][(row)][(col)]
 #define SMEM_B(stage, row, col) smem_b[(stage)][(row)][(col)]
 
 
 __global__ __launch_bounds__(256, 2)
-void kernel(int dim_m, int dim_n, int dim_k, const float* __restrict__ d_a, const float* __restrict__ d_b, float* __restrict__ d_c) 
+void kernel(int dim_m, int dim_n, int dim_k, const float* __restrict__ d_a, const float* __restrict__ d_b, float* __restrict__ d_c)
 {
 
-    const int bm = blockIdx.x * BM;  
-    const int bn = blockIdx.y * BN;   
+    const int bm = blockIdx.x * BM;
+    const int bn = blockIdx.y * BN;
 
     const int tid = threadIdx.x;
     const int warp_id = tid / 32;
@@ -34,8 +34,8 @@ void kernel(int dim_m, int dim_n, int dim_k, const float* __restrict__ d_a, cons
     const int wr = warp_id / WARPS_N;
     const int wc = warp_id % WARPS_N;
 
-    __shared__ half smem_a[2][BK][BM + PAD]; 
-    __shared__ half smem_b[2][BK][BN + PAD]; 
+    __shared__ half smem_a[2][BK][BM + PAD];
+    __shared__ half smem_b[2][BK][BN + PAD];
 
     wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2][4];
     #pragma unroll
@@ -44,55 +44,36 @@ void kernel(int dim_m, int dim_n, int dim_k, const float* __restrict__ d_a, cons
         for (int c = 0; c < 4; c++)
             wmma::fill_fragment(acc[r][c], 0.0f);
 
-    {
-        
         #pragma unroll
         for (int idx = tid; idx < BK * BM; idx += 256) {
             int k_local = idx / BM;
             int m_local = idx % BM;
             smem_a[0][k_local][m_local] = __float2half(d_a[k_local * dim_m + bm + m_local]);
+            smem_b[0][k_local][m_local] = __float2half(d_b[k_local * dim_n + bn + m_local]);
         }
-        #pragma unroll
-        for (int idx = tid; idx < BK * BN; idx += 256) {
-            int k_local = idx / BN;
-            int n_local = idx % BN;
-            smem_b[0][k_local][n_local] = __float2half(d_b[k_local * dim_n + bn + n_local]);
-        }
-    }
+
     __syncthreads();
 
-    for (int k = 0; k < dim_k; k += BK) {
+    for (int k = 0; k < dim_k-BK; k += BK) {
         int cur  = (k / BK) & 1;
         int next = cur ^ 1;
 
-        if (k + BK < dim_k) {
             int kn = k + BK;
             #pragma unroll
             for (int idx = tid; idx < BK * BM; idx += 256) {
                 int k_local = idx / BM;
                 int m_local = idx % BM;
                 smem_a[next][k_local][m_local] =__float2half(d_a[(kn + k_local) * dim_m + bm + m_local]);
+                smem_b[next][k_local][m_local] =__float2half(d_b[(kn + k_local) * dim_n + bn + m_local]);
             }
-            #pragma unroll
-            for (int idx = tid; idx < BK * BN; idx += 256) {
-                int k_local = idx / BN;
-                int n_local = idx % BN;
-                smem_b[next][k_local][n_local] =__float2half(d_b[(kn + k_local) * dim_n + bn + n_local]);
-            }
-        }
-
         #pragma unroll
         for (int r = 0; r < 2; r++) {
             wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> a_frag;
-            wmma::load_matrix_sync(a_frag,
-                &SMEM_A(cur, 0, wr * WARP_M + r * 16),
-                BM + PAD);
+            wmma::load_matrix_sync(a_frag, &SMEM_A(cur, 0, wr * WARP_M + r * 16), BM + PAD);
             #pragma unroll
             for (int c = 0; c < 4; c++) {
                 wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
-                wmma::load_matrix_sync(b_frag,
-                    &SMEM_B(cur, 0, wc * WARP_N + c * 16),
-                    BN + PAD);
+                wmma::load_matrix_sync(b_frag, &SMEM_B(cur, 0, wc * WARP_N + c * 16), BN + PAD);
                 wmma::mma_sync(acc[r][c], a_frag, b_frag, acc[r][c]);
             }
         }
@@ -112,8 +93,6 @@ void kernel(int dim_m, int dim_n, int dim_k, const float* __restrict__ d_a, cons
         }
     }
 }
-
-
 
 int main(int argc, const char **argv) {
   int m = 10240;
@@ -137,26 +116,24 @@ int main(int argc, const char **argv) {
     for (int j=0; j<m; j++)
       C[m*i+j] = C2[m*i+j] = 0;
 
-
-
   cublasHandle_t cublas_handle;
   cublasCreate(&cublas_handle);
   auto tic = chrono::steady_clock::now();
   for (int i = 0; i < Nt+2; i++) {
     if (i == 2) tic = chrono::steady_clock::now();
     cublasGemmEx(cublas_handle,
-		 CUBLAS_OP_N,
-		 CUBLAS_OP_N,
-		 m,
-		 n,
-		 k,
-		 &alpha,
-		 A, CUDA_R_32F, m,
-		 B, CUDA_R_32F, k,
-		 &beta,
-		 C, CUDA_R_32F, m,
-		 CUBLAS_COMPUTE_32F_FAST_16F,
-		 CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+                 CUBLAS_OP_N,
+                 CUBLAS_OP_N,
+                 m,
+                 n,
+                 k,
+                 &alpha,
+                 A, CUDA_R_32F, m,
+                 B, CUDA_R_32F, k,
+                 &beta,
+                 C, CUDA_R_32F, m,
+                 CUBLAS_COMPUTE_32F_FAST_16F,
+                 CUBLAS_GEMM_DEFAULT_TENSOR_OP);
     cudaDeviceSynchronize();
   }
   auto toc = chrono::steady_clock::now();
@@ -164,28 +141,22 @@ int main(int argc, const char **argv) {
   double tcublas = chrono::duration<double>(toc - tic).count() / Nt;
   double cublas_flops = double(num_flops) / tcublas / 1.0e9;
 
-
-
-
- dim3 block(256);
-   dim3 grid((m + BM - 1) / BM, (n + BN - 1) / BN);
-
+  dim3 block(256);
+  dim3 grid((m + BM - 1) / BM, (n + BN - 1) / BN);
   for (int i = 0; i < Nt+2; i++) {
     if (i == 2) tic = chrono::steady_clock::now();
     kernel<<< grid, block >>>(m,
-			      n,
-			      k,
-			      A,
-			      B,
-			      C2);
+                              n,
+                              k,
+                              A,
+                              B,
+                              C2);
     cudaDeviceSynchronize();
   }
   toc = chrono::steady_clock::now();
   double tcutlass = chrono::duration<double>(toc - tic).count() / Nt;
   double cutlass_flops = double(num_flops) / tcutlass / 1.0e9;
   printf("CUBLAS: %.2f Gflops, CUTLASS: %.2f Gflops\n", cublas_flops, cutlass_flops);
-
-
 
   double err = 0;
   for (int i=0; i<n; i++) {
@@ -200,3 +171,4 @@ int main(int argc, const char **argv) {
   cudaFree(C2);
   cublasDestroy(cublas_handle);
 }
+                                       
