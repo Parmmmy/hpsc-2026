@@ -44,25 +44,19 @@ void kernel(int dim_m, int dim_n, int dim_k, const float* __restrict__ d_a, cons
         for (int c = 0; c < 4; c++)
             wmma::fill_fragment(acc[r][c], 0.0f);
 
-     int k0 = 0;
-
     {
         
         #pragma unroll
         for (int idx = tid; idx < BK * BM; idx += 256) {
             int k_local = idx / BM;
             int m_local = idx % BM;
-            int g_k = k0 + k_local;
-            int g_m = bm + m_local;
-            smem_a[0][k_local][m_local] = __float2half(d_a[g_k * dim_m + g_m]);
+            smem_a[0][k_local][m_local] = __float2half(d_a[k_local * dim_m + bm + m_local]);
         }
         #pragma unroll
         for (int idx = tid; idx < BK * BN; idx += 256) {
             int k_local = idx / BN;
             int n_local = idx % BN;
-            int g_k = k0 + k_local;
-            int g_n = bn + n_local;
-            smem_b[0][k_local][n_local] = __float2half(d_b[g_k * dim_n + g_n]);
+            smem_b[0][k_local][n_local] = __float2half(d_b[k_local * dim_n + bn + n_local]);
         }
     }
     __syncthreads();
@@ -77,17 +71,13 @@ void kernel(int dim_m, int dim_n, int dim_k, const float* __restrict__ d_a, cons
             for (int idx = tid; idx < BK * BM; idx += 256) {
                 int k_local = idx / BM;
                 int m_local = idx % BM;
-                int g_k = kn + k_local;
-                int g_m = bm + m_local;
-                smem_a[next][k_local][m_local] =__float2half(d_a[g_k * dim_m + g_m]);
+                smem_a[next][k_local][m_local] =__float2half(d_a[(kn + k_local) * dim_m + bm + m_local]);
             }
             #pragma unroll
             for (int idx = tid; idx < BK * BN; idx += 256) {
                 int k_local = idx / BN;
                 int n_local = idx % BN;
-                int g_k = kn + k_local;
-                int g_n = bn + n_local;
-                smem_b[next][k_local][n_local] =__float2half(d_b[g_k * dim_n + g_n]);
+                smem_b[next][k_local][n_local] =__float2half(d_b[(kn + k_local) * dim_n + bn + n_local]);
             }
         }
 
