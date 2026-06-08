@@ -74,6 +74,29 @@ int main(int argc, const char **argv) {
       C[m*i+j] = C2[m*i+j] = 0;
 
 
+
+  int tile = 64;
+  dim3 block = dim3(tile);
+  dim3 grid = dim3((m+tile-1)/tile, (n+tile-1)/tile);
+  for (int i = 0; i < Nt+2; i++) {
+    if (i == 2) tic = chrono::steady_clock::now();
+    kernel<<< grid, block >>>(m,
+			      n,
+			      k,
+			      A,
+			      B,
+			      C2);
+    cudaDeviceSynchronize();
+  }
+  toc = chrono::steady_clock::now();
+  double tcutlass = chrono::duration<double>(toc - tic).count() / Nt;
+  double cutlass_flops = double(num_flops) / tcutlass / 1.0e9;
+  printf("CUBLAS: %.2f Gflops, CUTLASS: %.2f Gflops\n", cublas_flops, cutlass_flops);
+
+
+
+
+
   //cublas reference
   cublasHandle_t cublas_handle;
   cublasCreate(&cublas_handle);
@@ -103,23 +126,6 @@ int main(int argc, const char **argv) {
 
 
 
-  int tile = 64;
-  dim3 block = dim3(tile);
-  dim3 grid = dim3((m+tile-1)/tile, (n+tile-1)/tile);
-  for (int i = 0; i < Nt+2; i++) {
-    if (i == 2) tic = chrono::steady_clock::now();
-    kernel<<< grid, block >>>(m,
-			      n,
-			      k,
-			      A,
-			      B,
-			      C2);
-    cudaDeviceSynchronize();
-  }
-  toc = chrono::steady_clock::now();
-  double tcutlass = chrono::duration<double>(toc - tic).count() / Nt;
-  double cutlass_flops = double(num_flops) / tcutlass / 1.0e9;
-  printf("CUBLAS: %.2f Gflops, CUTLASS: %.2f Gflops\n", cublas_flops, cutlass_flops);
   double err = 0;
   for (int i=0; i<n; i++) {
     for (int j=0; j<m; j++) {
